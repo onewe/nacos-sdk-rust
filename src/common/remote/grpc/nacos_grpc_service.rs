@@ -8,6 +8,7 @@ use tonic::async_trait;
 use tower::{Layer, Service};
 use want::Giver;
 
+use crate::api::error::Error::ErrResult;
 use crate::{api::error::Error, nacos_proto::v2::Payload};
 
 pub(crate) enum NacosGrpcCall {
@@ -60,7 +61,11 @@ impl<T> Callback<T> {
     pub(crate) async fn send(&mut self, data: T) -> Result<(), Error> {
         let sender = self.tx.take();
         if let Some(sender) = sender {
-            let _ = sender.send(data);
+            if sender.send(data).is_err() {
+                return Err(ErrResult(
+                    "callback send failed. the receiver has been dropped".to_string(),
+                ));
+            }
         }
         Ok(())
     }
