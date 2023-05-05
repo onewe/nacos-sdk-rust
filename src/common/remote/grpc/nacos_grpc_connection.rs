@@ -191,7 +191,7 @@ where
         let conn_id_send_ret = conn_id_sender.send(connection_id.clone());
         if let Err(e) = conn_id_send_ret {
             // maybe error? perhaps.
-            error!("send conntion id to bi stream task occur an error. please check connection state. {e}");
+            error!("send connection id to bi stream task occur an error. please check connection state. {e}");
         }
 
         // set connection id
@@ -791,5 +791,59 @@ where
             .await?;
         let ret = svc.call(request).in_current_span().await;
         ret.map_err(|error| GrpcBufferRequest(error))
+    }
+}
+
+#[cfg(test)]
+pub mod nacos_grpc_connection_tests {
+
+    use crate::common::remote::grpc::tonic::GrpcCallTask;
+    use std::task::Context;
+    use mockall::*;
+    use super::*;
+
+    mock!{
+        Tonic{}
+
+        impl Service<NacosGrpcCall> for Tonic {
+
+            type Response = ();
+
+            type Error = Error;
+
+            type Future = GrpcCallTask;
+        
+            fn poll_ready<'a>(&mut self, cx: &mut Context<'a>) -> Poll<Result<(), <Self as Service<NacosGrpcCall>>::Error>>;
+
+            fn call(&mut self, call: NacosGrpcCall) -> <Self as Service<NacosGrpcCall>>::Future;
+
+
+        }
+    }
+
+    mock!{
+
+        TonicBuilder{}
+        impl Service<()> for TonicBuilder{
+            type Response = MockTonic;
+
+            type Error = Error;
+
+            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+            fn poll_ready<'a>(&mut self, cx: &mut Context<'a>) -> Poll<Result<(), <Self as Service<()>>::Error>>;
+
+            fn call(&mut self, request: ()) -> <Self as Service<()>>::Future;
+
+        }
+    }
+
+
+
+    #[test]
+    fn test() {
+
+        // let mock_tonic_builder = MockTonicBuilder::new();
+        
     }
 }

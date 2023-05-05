@@ -148,7 +148,11 @@ impl Layer<DynamicBiStreamingCallService> for BiStreamingCallIdentityLayer {
 
 #[cfg(test)]
 pub mod unary_call_layer_test {
-    use std::{pin::Pin, sync::Arc, task::Poll};
+    use std::{
+        pin::Pin,
+        sync::{Arc, Once},
+        task::Poll,
+    };
 
     use futures::{future::poll_fn, Future};
     use tower::{layer::util::Stack, Layer, Service};
@@ -338,62 +342,82 @@ pub mod unary_call_layer_test {
         }
     }
 
-    #[ignore]
+    static INIT: Once = Once::new();
+
+    fn setup() {
+        INIT.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_thread_names(true)
+                .with_file(true)
+                .with_level(true)
+                .with_line_number(true)
+                .with_thread_ids(true)
+                .with_max_level(LevelFilter::DEBUG)
+                .init()
+        });
+    }
+
+    fn teardown() {}
+
+    fn run_test<T, F>(test: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        setup();
+        let ret = test();
+        teardown();
+        ret
+    }
+
     #[tokio::test]
     pub async fn test() {
-        tracing_subscriber::fmt()
-            .with_thread_names(true)
-            .with_file(true)
-            .with_level(true)
-            .with_line_number(true)
-            .with_thread_ids(true)
-            .with_max_level(LevelFilter::DEBUG)
-            .init();
+        run_test(|| async {
+            let builder = UnaryCallLayerBuilder::new()
+                .add_layer(Arc::new(UnaryCallLayerA))
+                .add_layer(Arc::new(UnaryCallLayerB))
+                .add_layer(Arc::new(UnaryCallLayerC));
+            let layer = builder.build();
 
-        let builder = UnaryCallLayerBuilder::new()
-            .add_layer(Arc::new(UnaryCallLayerA))
-            .add_layer(Arc::new(UnaryCallLayerB))
-            .add_layer(Arc::new(UnaryCallLayerC));
-        let layer = builder.build();
+            let mut service = layer.layer(Box::new(RealDynamicUnaryCallService));
 
-        let mut service = layer.layer(Box::new(RealDynamicUnaryCallService));
+            let mut payload = Payload::default();
 
-        let mut payload = Payload::default();
+            let mut metadata = Metadata::default();
+            metadata
+                .headers
+                .insert("init".to_string(), "ok".to_string());
 
-        let mut metadata = Metadata::default();
-        metadata
-            .headers
-            .insert("init".to_string(), "ok".to_string());
+            payload.metadata = Some(metadata);
 
-        payload.metadata = Some(metadata);
+            let ready = poll_fn(|cx| service.poll_ready(cx)).await;
+            assert!(ready.is_ok());
 
-        let ready = poll_fn(|cx| service.poll_ready(cx)).await;
-        assert!(ready.is_ok());
+            let ret = service.call(payload).await;
 
-        let ret = service.call(payload).await;
+            assert!(ret.is_ok());
 
-        assert!(ret.is_ok());
+            let mut ret = ret.unwrap();
+            let metadata = ret.metadata.take();
 
-        let mut ret = ret.unwrap();
-        let metadata = ret.metadata.take();
+            assert!(metadata.is_some());
 
-        assert!(metadata.is_some());
+            let metadata = metadata.unwrap();
 
-        let metadata = metadata.unwrap();
+            let init = metadata.headers.get("init").unwrap();
+            assert!(init.eq("ok"));
 
-        let init = metadata.headers.get("init").unwrap();
-        assert!(init.eq("ok"));
+            let a = metadata.headers.get("DynamicUnaryCallServiceA").unwrap();
+            assert!(a.eq("ok"));
 
-        let a = metadata.headers.get("DynamicUnaryCallServiceA").unwrap();
-        assert!(a.eq("ok"));
+            let b = metadata.headers.get("DynamicUnaryCallServiceB").unwrap();
+            assert!(b.eq("ok"));
 
-        let b = metadata.headers.get("DynamicUnaryCallServiceB").unwrap();
-        assert!(b.eq("ok"));
+            let c = metadata.headers.get("DynamicUnaryCallServiceC").unwrap();
+            assert!(c.eq("ok"));
 
-        let c = metadata.headers.get("DynamicUnaryCallServiceC").unwrap();
-        assert!(c.eq("ok"));
-
-        let d = metadata.headers.get("RealDynamicUnaryCallService").unwrap();
-        assert!(d.eq("ok"));
+            let d = metadata.headers.get("RealDynamicUnaryCallService").unwrap();
+            assert!(d.eq("ok"));
+        })
+        .await;
     }
 }

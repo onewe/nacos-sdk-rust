@@ -474,9 +474,12 @@ impl Service<GrpcStream<Payload>> for BiStreamingCallService {
 
 #[cfg(test)]
 pub mod tonic_unary_call_tests {
+    use std::sync::Once;
+
     use crate::nacos_proto::v2::Metadata;
     use mockall::*;
     use tokio::sync::oneshot;
+    use tracing::metadata::LevelFilter;
 
     use super::*;
 
@@ -497,167 +500,248 @@ pub mod tonic_unary_call_tests {
         }
     }
 
+    static INIT: Once = Once::new();
+
+    fn setup() {
+        INIT.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_thread_names(true)
+                .with_file(true)
+                .with_level(true)
+                .with_line_number(true)
+                .with_thread_ids(true)
+                .with_max_level(LevelFilter::DEBUG)
+                .init()
+        });
+    }
+
+    fn teardown() {}
+
+    fn run_test<T, F>(test: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        setup();
+        let ret = test();
+        teardown();
+        ret
+    }
+
     #[tokio::test]
     pub async fn test_unary_request_and_can_not_send() {
-        let mut test_service = MockUnaryCallTestService::new();
-        test_service
-            .expect_poll_ready()
-            .returning(|_| Poll::Ready(Ok(())));
-        test_service
-            .expect_call()
-            .returning(|request| Box::pin(async move { Ok(request) }));
+        run_test(|| async {
+            let mut test_service = MockUnaryCallTestService::new();
+            test_service
+                .expect_poll_ready()
+                .returning(|_| Poll::Ready(Ok(())));
+            test_service
+                .expect_call()
+                .returning(|request| Box::pin(async move { Ok(request) }));
 
-        let request = Payload::default();
+            let request = Payload::default();
 
-        let (giver, taker) = want::new();
-        let (tx, _rx) = oneshot::channel::<Result<Payload, Error>>();
-        let callback = Callback::new(giver, tx);
+            let (giver, taker) = want::new();
+            let (tx, _rx) = oneshot::channel::<Result<Payload, Error>>();
+            let callback = Callback::new(giver, tx);
 
-        drop(taker);
+            drop(taker);
 
-        let ret = unary_request(Box::new(test_service), (request, callback)).await;
+            let ret = unary_request(Box::new(test_service), (request, callback)).await;
 
-        assert!(ret.is_err());
+            assert!(ret.is_err());
 
-        let error = ret.unwrap_err();
-        match error {
-            Error::ErrResult(msg) => {
-                assert_eq!(
-                    msg,
-                    "unary_request failed, callback can not invoke, receiver has been closed."
-                );
+            let error = ret.unwrap_err();
+            match error {
+                Error::ErrResult(msg) => {
+                    assert_eq!(
+                        msg,
+                        "unary_request failed, callback can not invoke, receiver has been closed."
+                    );
+                }
+                _ => {
+                    assert!(false, "match error");
+                }
             }
-            _ => {
-                assert!(false, "match error");
-            }
-        }
+        })
+        .await;
     }
 
     #[tokio::test]
     pub async fn test_unary_request_and_response_send_error() {
-        let mut test_service = MockUnaryCallTestService::new();
-        test_service
-            .expect_poll_ready()
-            .returning(|_| Poll::Ready(Ok(())));
-        test_service
-            .expect_call()
-            .returning(|request| Box::pin(async move { Ok(request) }));
+        run_test(|| async {
+            let mut test_service = MockUnaryCallTestService::new();
+            test_service
+                .expect_poll_ready()
+                .returning(|_| Poll::Ready(Ok(())));
+            test_service
+                .expect_call()
+                .returning(|request| Box::pin(async move { Ok(request) }));
 
-        let request = Payload::default();
+            let request = Payload::default();
 
-        let (giver, mut taker) = want::new();
-        let (tx, rx) = oneshot::channel::<Result<Payload, Error>>();
-        let callback = Callback::new(giver, tx);
+            let (giver, mut taker) = want::new();
+            let (tx, rx) = oneshot::channel::<Result<Payload, Error>>();
+            let callback = Callback::new(giver, tx);
 
-        taker.want();
+            taker.want();
 
-        drop(rx);
+            drop(rx);
 
-        let ret = unary_request(Box::new(test_service), (request, callback)).await;
+            let ret = unary_request(Box::new(test_service), (request, callback)).await;
 
-        assert!(ret.is_err());
+            assert!(ret.is_err());
 
-        let error = ret.unwrap_err();
-        match error {
-            Error::ErrResult(msg) => {
-                assert_eq!(
-                    msg,
-                    "unary_request failed, callback can not invoke, send error."
-                );
+            let error = ret.unwrap_err();
+            match error {
+                Error::ErrResult(msg) => {
+                    assert_eq!(
+                        msg,
+                        "unary_request failed, callback can not invoke, send error."
+                    );
+                }
+                _ => {
+                    assert!(false, "match error");
+                }
             }
-            _ => {
-                assert!(false, "match error");
-            }
-        }
+        })
+        .await;
     }
 
     #[tokio::test]
     pub async fn test_unary_request_and_request_service_not_ready() {
-        let mut test_service = MockUnaryCallTestService::new();
-        test_service.expect_poll_ready().returning(|_| {
-            Poll::Ready(Err(Error::ErrResult(
-                "test_service is not ready.".to_string(),
-            )))
-        });
-        test_service
-            .expect_call()
-            .returning(|request| Box::pin(async move { Ok(request) }));
+        run_test(|| async {
+            let mut test_service = MockUnaryCallTestService::new();
+            test_service.expect_poll_ready().returning(|_| {
+                Poll::Ready(Err(Error::ErrResult(
+                    "test_service is not ready.".to_string(),
+                )))
+            });
+            test_service
+                .expect_call()
+                .returning(|request| Box::pin(async move { Ok(request) }));
 
-        let request = Payload::default();
+            let request = Payload::default();
 
-        let (giver, mut taker) = want::new();
-        let (tx, _rx) = oneshot::channel::<Result<Payload, Error>>();
-        let callback = Callback::new(giver, tx);
+            let (giver, mut taker) = want::new();
+            let (tx, _rx) = oneshot::channel::<Result<Payload, Error>>();
+            let callback = Callback::new(giver, tx);
 
-        taker.want();
+            taker.want();
 
-        let ret = unary_request(Box::new(test_service), (request, callback)).await;
+            let ret = unary_request(Box::new(test_service), (request, callback)).await;
 
-        assert!(ret.is_err());
+            assert!(ret.is_err());
 
-        let error = ret.unwrap_err();
-        match error {
-            Error::ErrResult(msg) => {
-                assert_eq!(msg, "test_service is not ready.");
+            let error = ret.unwrap_err();
+            match error {
+                Error::ErrResult(msg) => {
+                    assert_eq!(msg, "test_service is not ready.");
+                }
+                _ => {
+                    assert!(false, "match error");
+                }
             }
-            _ => {
-                assert!(false, "match error");
-            }
-        }
+        })
+        .await;
     }
 
     #[tokio::test]
     pub async fn test_unary_request() {
-        let mut test_service = MockUnaryCallTestService::new();
-        test_service
-            .expect_poll_ready()
-            .returning(|_| Poll::Ready(Ok(())));
-        test_service
-            .expect_call()
-            .returning(|request| Box::pin(async move { Ok(request) }));
+        run_test(|| async {
+            let mut test_service = MockUnaryCallTestService::new();
+            test_service
+                .expect_poll_ready()
+                .returning(|_| Poll::Ready(Ok(())));
+            test_service
+                .expect_call()
+                .returning(|request| Box::pin(async move { Ok(request) }));
 
-        let mut request = Payload::default();
+            let mut request = Payload::default();
 
-        let mut metadata = Metadata::default();
-        metadata.r#type = "test_type".to_string();
+            let mut metadata = Metadata::default();
+            metadata.r#type = "test_type".to_string();
 
-        request.metadata = Some(metadata);
+            request.metadata = Some(metadata);
 
-        let (giver, mut taker) = want::new();
-        let (tx, rx) = oneshot::channel::<Result<Payload, Error>>();
-        let callback = Callback::new(giver, tx);
+            let (giver, mut taker) = want::new();
+            let (tx, rx) = oneshot::channel::<Result<Payload, Error>>();
+            let callback = Callback::new(giver, tx);
 
-        taker.want();
+            taker.want();
 
-        let ret = unary_request(Box::new(test_service), (request, callback)).await;
-        assert!(ret.is_ok());
+            let ret = unary_request(Box::new(test_service), (request, callback)).await;
+            assert!(ret.is_ok());
 
-        let response = rx.await;
-        assert!(response.is_ok());
+            let response = rx.await;
+            assert!(response.is_ok());
 
-        let response = response.unwrap();
-        assert!(response.is_ok());
+            let response = response.unwrap();
+            assert!(response.is_ok());
 
-        let mut response = response.unwrap();
+            let mut response = response.unwrap();
 
-        let metadata = response.metadata.take();
+            let metadata = response.metadata.take();
 
-        assert!(metadata.is_some());
+            assert!(metadata.is_some());
 
-        let metadata = metadata.unwrap();
+            let metadata = metadata.unwrap();
 
-        assert_eq!(metadata.r#type, "test_type".to_string());
+            assert_eq!(metadata.r#type, "test_type".to_string());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    pub async fn test_unary_request_and_response_error() {
+        run_test(|| async {
+            let mut test_service = MockUnaryCallTestService::new();
+            test_service
+                .expect_poll_ready()
+                .returning(|_| Poll::Ready(Ok(())));
+            test_service.expect_call().returning(|_| {
+                Box::pin(async move { Err(Error::ErrResult("test-error".to_string())) })
+            });
+
+            let request = Payload::default();
+
+            let (giver, mut taker) = want::new();
+            let (tx, rx) = oneshot::channel::<Result<Payload, Error>>();
+            let callback = Callback::new(giver, tx);
+
+            taker.want();
+
+            let ret = unary_request(Box::new(test_service), (request, callback)).await;
+            assert!(ret.is_ok());
+
+            let response = rx.await;
+            assert!(response.is_ok());
+
+            let response = response.unwrap();
+            assert!(response.is_err());
+
+            let error = response.unwrap_err();
+            match error {
+                Error::ErrResult(msg) => {
+                    assert!(msg.eq("test-error"))
+                }
+                _ => {}
+            }
+        })
+        .await;
     }
 }
 
 #[cfg(test)]
 pub mod tonic_bi_call_tests {
 
+    use std::sync::Once;
+
     use crate::nacos_proto::v2::Metadata;
     use async_stream::stream;
     use futures_util::stream;
     use mockall::*;
     use tokio::sync::oneshot;
+    use tracing::metadata::LevelFilter;
 
     use super::*;
 
@@ -678,197 +762,292 @@ pub mod tonic_bi_call_tests {
         }
     }
 
+    static INIT: Once = Once::new();
+
+    fn setup() {
+        INIT.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_thread_names(true)
+                .with_file(true)
+                .with_level(true)
+                .with_line_number(true)
+                .with_thread_ids(true)
+                .with_max_level(LevelFilter::DEBUG)
+                .init()
+        });
+    }
+
+    fn teardown() {}
+
+    fn run_test<T, F>(test: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        setup();
+        let ret = test();
+        teardown();
+        ret
+    }
+
     #[tokio::test]
     pub async fn test_bi_request_and_can_not_send() {
-        let mut test_service = MockBiCallTestService::new();
-        test_service
-            .expect_poll_ready()
-            .returning(|_| Poll::Ready(Ok(())));
-        test_service.expect_call().returning(|request_stream| {
-            let response_stream = stream! {
-                for await request in request_stream {
-                    yield Ok(request);
+        run_test(|| async {
+            let mut test_service = MockBiCallTestService::new();
+            test_service
+                .expect_poll_ready()
+                .returning(|_| Poll::Ready(Ok(())));
+            test_service.expect_call().returning(|request_stream| {
+                let response_stream = stream! {
+                    for await request in request_stream {
+                        yield Ok(request);
+                    }
+                };
+
+                let grpc_stream = GrpcStream::new(Box::pin(response_stream));
+                Box::pin(async move { Ok(grpc_stream) })
+            });
+            let request_stream = stream::once(async move { Payload::default() });
+
+            let request_stream = GrpcStream::new(Box::pin(request_stream));
+            let (giver, taker) = want::new();
+            let (tx, _rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
+            let callback = Callback::new(giver, tx);
+
+            drop(taker);
+
+            let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
+
+            assert!(ret.is_err());
+
+            let error = ret.unwrap_err();
+            match error {
+                Error::ErrResult(msg) => {
+                    assert_eq!(
+                        msg,
+                        "bi_request failed, callback can not invoke, receiver has been closed."
+                    );
                 }
-            };
-
-            let grpc_stream = GrpcStream::new(Box::pin(response_stream));
-            Box::pin(async move { Ok(grpc_stream) })
-        });
-        let request_stream = stream::once(async move { Payload::default() });
-
-        let request_stream = GrpcStream::new(Box::pin(request_stream));
-        let (giver, taker) = want::new();
-        let (tx, _rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
-        let callback = Callback::new(giver, tx);
-
-        drop(taker);
-
-        let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
-
-        assert!(ret.is_err());
-
-        let error = ret.unwrap_err();
-        match error {
-            Error::ErrResult(msg) => {
-                assert_eq!(
-                    msg,
-                    "bi_request failed, callback can not invoke, receiver has been closed."
-                );
+                _ => {
+                    assert!(false, "match error");
+                }
             }
-            _ => {
-                assert!(false, "match error");
-            }
-        }
+        })
+        .await;
     }
 
     #[tokio::test]
     pub async fn test_bi_request_and_response_send_error() {
-        let mut test_service = MockBiCallTestService::new();
-        test_service
-            .expect_poll_ready()
-            .returning(|_| Poll::Ready(Ok(())));
-        test_service.expect_call().returning(|request_stream| {
-            let response_stream = stream! {
-                for await request in request_stream {
-                    yield Ok(request);
+        run_test(|| async {
+            let mut test_service = MockBiCallTestService::new();
+            test_service
+                .expect_poll_ready()
+                .returning(|_| Poll::Ready(Ok(())));
+            test_service.expect_call().returning(|request_stream| {
+                let response_stream = stream! {
+                    for await request in request_stream {
+                        yield Ok(request);
+                    }
+                };
+
+                let grpc_stream = GrpcStream::new(Box::pin(response_stream));
+                Box::pin(async move { Ok(grpc_stream) })
+            });
+            let request_stream = stream::once(async move { Payload::default() });
+
+            let request_stream = GrpcStream::new(Box::pin(request_stream));
+            let (giver, mut taker) = want::new();
+            let (tx, rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
+            let callback = Callback::new(giver, tx);
+
+            taker.want();
+
+            drop(rx);
+
+            let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
+
+            assert!(ret.is_err());
+
+            let error = ret.unwrap_err();
+            match error {
+                Error::ErrResult(msg) => {
+                    assert_eq!(
+                        msg,
+                        "bi_request failed, callback can not invoke, send error."
+                    );
                 }
-            };
-
-            let grpc_stream = GrpcStream::new(Box::pin(response_stream));
-            Box::pin(async move { Ok(grpc_stream) })
-        });
-        let request_stream = stream::once(async move { Payload::default() });
-
-        let request_stream = GrpcStream::new(Box::pin(request_stream));
-        let (giver, mut taker) = want::new();
-        let (tx, rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
-        let callback = Callback::new(giver, tx);
-
-        taker.want();
-
-        drop(rx);
-
-        let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
-
-        assert!(ret.is_err());
-
-        let error = ret.unwrap_err();
-        match error {
-            Error::ErrResult(msg) => {
-                assert_eq!(
-                    msg,
-                    "bi_request failed, callback can not invoke, send error."
-                );
+                _ => {
+                    assert!(false, "match error");
+                }
             }
-            _ => {
-                assert!(false, "match error");
-            }
-        }
+        })
+        .await;
     }
 
     #[tokio::test]
     pub async fn test_bi_request_and_request_service_is_ready() {
-        let mut test_service = MockBiCallTestService::new();
-        test_service.expect_poll_ready().returning(|_| {
-            Poll::Ready(Err(Error::ErrResult(
-                "test_service is not ready.".to_string(),
-            )))
-        });
-        test_service.expect_call().returning(|request_stream| {
-            let response_stream = stream! {
-                for await request in request_stream {
-                    yield Ok(request);
+        run_test(|| async {
+            let mut test_service = MockBiCallTestService::new();
+            test_service.expect_poll_ready().returning(|_| {
+                Poll::Ready(Err(Error::ErrResult(
+                    "test_service is not ready.".to_string(),
+                )))
+            });
+            test_service.expect_call().returning(|request_stream| {
+                let response_stream = stream! {
+                    for await request in request_stream {
+                        yield Ok(request);
+                    }
+                };
+
+                let grpc_stream = GrpcStream::new(Box::pin(response_stream));
+                Box::pin(async move { Ok(grpc_stream) })
+            });
+            let request_stream = stream::once(async move { Payload::default() });
+
+            let request_stream = GrpcStream::new(Box::pin(request_stream));
+            let (giver, mut taker) = want::new();
+            let (tx, _rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
+            let callback = Callback::new(giver, tx);
+
+            taker.want();
+
+            let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
+
+            assert!(ret.is_err());
+
+            let error = ret.unwrap_err();
+            match error {
+                Error::ErrResult(msg) => {
+                    assert_eq!(msg, "test_service is not ready.");
                 }
-            };
-
-            let grpc_stream = GrpcStream::new(Box::pin(response_stream));
-            Box::pin(async move { Ok(grpc_stream) })
-        });
-        let request_stream = stream::once(async move { Payload::default() });
-
-        let request_stream = GrpcStream::new(Box::pin(request_stream));
-        let (giver, mut taker) = want::new();
-        let (tx, _rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
-        let callback = Callback::new(giver, tx);
-
-        taker.want();
-
-        let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
-
-        assert!(ret.is_err());
-
-        let error = ret.unwrap_err();
-        match error {
-            Error::ErrResult(msg) => {
-                assert_eq!(msg, "test_service is not ready.");
+                _ => {
+                    assert!(false, "match error");
+                }
             }
-            _ => {
-                assert!(false, "match error");
-            }
-        }
+        })
+        .await;
     }
 
     #[tokio::test]
     pub async fn test_bi_request() {
-        let mut test_service = MockBiCallTestService::new();
-        test_service
-            .expect_poll_ready()
-            .returning(|_| Poll::Ready(Ok(())));
-        test_service.expect_call().returning(|request_stream| {
-            let response_stream = stream! {
-                for await request in request_stream {
-                    yield Ok(request);
+        run_test(|| async {
+            let mut test_service = MockBiCallTestService::new();
+            test_service
+                .expect_poll_ready()
+                .returning(|_| Poll::Ready(Ok(())));
+            test_service.expect_call().returning(|request_stream| {
+                let response_stream = stream! {
+                    for await request in request_stream {
+                        yield Ok(request);
+                    }
+                };
+
+                let grpc_stream = GrpcStream::new(Box::pin(response_stream));
+                Box::pin(async move { Ok(grpc_stream) })
+            });
+            let request_stream = stream::once(async move {
+                let mut payload = Payload::default();
+
+                let mut metadata = Metadata::default();
+                metadata.r#type = "test_type".to_string();
+
+                payload.metadata = Some(metadata);
+
+                payload
+            });
+
+            let request_stream = GrpcStream::new(Box::pin(request_stream));
+            let (giver, mut taker) = want::new();
+            let (tx, rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
+            let callback = Callback::new(giver, tx);
+
+            taker.want();
+
+            let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
+            assert!(ret.is_ok());
+
+            let response = rx.await;
+            assert!(response.is_ok());
+
+            let response = response.unwrap();
+            assert!(response.is_ok());
+
+            let mut response = response.unwrap();
+
+            let response = response.next().await;
+
+            assert!(response.is_some());
+
+            let response = response.unwrap();
+
+            assert!(response.is_ok());
+
+            let mut response = response.unwrap();
+
+            let metadata = response.metadata.take();
+
+            assert!(metadata.is_some());
+
+            let metadata = metadata.unwrap();
+
+            assert_eq!(metadata.r#type, "test_type".to_string());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    pub async fn test_bi_request_and_response_error() {
+        run_test(|| async {
+            let mut test_service = MockBiCallTestService::new();
+            test_service
+                .expect_poll_ready()
+                .returning(|_| Poll::Ready(Ok(())));
+            test_service.expect_call().returning(|request_stream| {
+                let response_stream = stream! {
+                    for await _ in request_stream {
+                        yield Err(Error::ErrResult("test-error".to_string()));
+                    }
+                };
+
+                let grpc_stream = GrpcStream::new(Box::pin(response_stream));
+                Box::pin(async move { Ok(grpc_stream) })
+            });
+            let request_stream = stream::once(async move { Payload::default() });
+
+            let request_stream = GrpcStream::new(Box::pin(request_stream));
+            let (giver, mut taker) = want::new();
+            let (tx, rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
+            let callback = Callback::new(giver, tx);
+
+            taker.want();
+
+            let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
+            assert!(ret.is_ok());
+
+            let response = rx.await;
+            assert!(response.is_ok());
+
+            let response = response.unwrap();
+            assert!(response.is_ok());
+
+            let mut response = response.unwrap();
+
+            let response = response.next().await;
+
+            assert!(response.is_some());
+
+            let response = response.unwrap();
+
+            assert!(response.is_err());
+
+            let error = response.unwrap_err();
+            match error {
+                Error::ErrResult(msg) => {
+                    assert!(msg.eq("test-error"))
                 }
-            };
-
-            let grpc_stream = GrpcStream::new(Box::pin(response_stream));
-            Box::pin(async move { Ok(grpc_stream) })
-        });
-        let request_stream = stream::once(async move {
-            let mut payload = Payload::default();
-
-            let mut metadata = Metadata::default();
-            metadata.r#type = "test_type".to_string();
-
-            payload.metadata = Some(metadata);
-
-            payload
-        });
-
-        let request_stream = GrpcStream::new(Box::pin(request_stream));
-        let (giver, mut taker) = want::new();
-        let (tx, rx) = oneshot::channel::<Result<GrpcStream<Result<Payload, Error>>, Error>>();
-        let callback = Callback::new(giver, tx);
-
-        taker.want();
-
-        let ret = bi_request(Box::new(test_service), (request_stream, callback)).await;
-        assert!(ret.is_ok());
-
-        let response = rx.await;
-        assert!(response.is_ok());
-
-        let response = response.unwrap();
-        assert!(response.is_ok());
-
-        let mut response = response.unwrap();
-
-        let response = response.next().await;
-
-        assert!(response.is_some());
-
-        let response = response.unwrap();
-
-        assert!(response.is_ok());
-
-        let mut response = response.unwrap();
-
-        let metadata = response.metadata.take();
-
-        assert!(metadata.is_some());
-
-        let metadata = metadata.unwrap();
-
-        assert_eq!(metadata.r#type, "test_type".to_string());
+                _ => {}
+            }
+        })
+        .await;
     }
 }
