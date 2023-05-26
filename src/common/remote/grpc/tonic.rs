@@ -307,6 +307,25 @@ where
     }
 }
 
+#[cfg(test)]
+mockall::mock! {
+    pub(crate) TonicBuilder{}
+
+    impl Service<()> for TonicBuilder {
+
+        type Response = MockTonic;
+
+        type Error = Error;
+
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready<'a>(&mut self, cx: &mut Context<'a>) -> Poll<Result<(), <Self as Service<()>>::Error>>;
+
+        fn call(&mut self, request: ()) -> <Self as Service<()>>::Future;
+    }
+}
+
+
 impl Service<NacosGrpcCall> for Tonic {
     type Response = ();
 
@@ -351,6 +370,27 @@ impl Service<NacosGrpcCall> for Tonic {
                 bi_request(dynamic_bi_call_service, request)
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mockall::mock! {
+    pub(crate) Tonic{}
+
+    impl Service<NacosGrpcCall> for Tonic {
+
+        type Response = ();
+
+        type Error = Error;
+
+        type Future = GrpcCallTask;
+
+        fn poll_ready<'a>(&mut self, cx: &mut Context<'a>) -> Poll<Result<(), <Self as Service<NacosGrpcCall>>::Error>>;
+
+        fn call(&mut self, call: NacosGrpcCall) -> <Self as Service<NacosGrpcCall>>::Future;
+
+
     }
 }
 

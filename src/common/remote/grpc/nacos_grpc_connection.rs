@@ -806,43 +806,19 @@ where
 pub mod nacos_grpc_connection_tests {
 
     use super::*;
-    use crate::common::remote::grpc::tonic::GrpcCallTask;
+    use crate::common::remote::grpc::tonic::{GrpcCallTask, MockTonicBuilder};
     use mockall::*;
     use std::task::Context;
+    use crate::common::remote::grpc::tonic::MockTonic;
+    
 
-    mock! {
-        Tonic{}
+    #[test]
+    pub fn test_check_server() {
+        let mock_tonic_builder = MockTonicBuilder::new();
+        let mut mock_tonic = MockTonic::new();
+        let grpc_connection = NacosGrpcConnection::<MockTonicBuilder>::check_server(&mut mock_tonic);
 
-        impl Service<NacosGrpcCall> for Tonic {
-
-            type Response = ();
-
-            type Error = Error;
-
-            type Future = GrpcCallTask;
-
-            fn poll_ready<'a>(&mut self, cx: &mut Context<'a>) -> Poll<Result<(), <Self as Service<NacosGrpcCall>>::Error>>;
-
-            fn call(&mut self, call: NacosGrpcCall) -> <Self as Service<NacosGrpcCall>>::Future;
-
-
-        }
     }
 
-    mock! {
 
-        TonicBuilder{}
-        impl Service<()> for TonicBuilder{
-            type Response = MockTonic;
-
-            type Error = Error;
-
-            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-            fn poll_ready<'a>(&mut self, cx: &mut Context<'a>) -> Poll<Result<(), <Self as Service<()>>::Error>>;
-
-            fn call(&mut self, request: ()) -> <Self as Service<()>>::Future;
-
-        }
-    }
 }
