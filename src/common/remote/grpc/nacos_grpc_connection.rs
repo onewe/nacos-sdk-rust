@@ -807,16 +807,147 @@ pub mod nacos_grpc_connection_tests {
 
     use super::*;
     use crate::common::remote::grpc::tonic::{GrpcCallTask, MockTonicBuilder};
-    use mockall::*;
-    use std::task::Context;
     use crate::common::remote::grpc::tonic::MockTonic;
+    use crate::common::remote::grpc::message::response::ErrorResponse;
     
 
-    #[test]
-    pub fn test_check_server() {
-        let mock_tonic_builder = MockTonicBuilder::new();
+    #[tokio::test]
+    pub async fn test_check_server_when_response_rx_dropped() {
         let mut mock_tonic = MockTonic::new();
-        let grpc_connection = NacosGrpcConnection::<MockTonicBuilder>::check_server(&mut mock_tonic);
+        mock_tonic.expect_call().returning(|arg| {
+            match arg {
+                NacosGrpcCall::RequestService((payload, callback)) => {
+                    drop(callback);
+                    drop(payload);
+                    return GrpcCallTask::new(Box::new(async move {Ok(())}));
+                },
+                _ => panic!("wrong args")
+            }
+        });
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::check_server(&mut mock_tonic).await;
+        
+        assert!(ret.is_err());
+
+        let ret = ret.unwrap_err();
+        match ret {
+            ErrResult(msg) => assert_eq!(msg, "grpc request callback failed"),
+            _ => panic!("check failed")
+        }
+    }
+
+    #[tokio::test]
+    pub async fn test_check_server_when_response_error() {
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(|arg| {
+            match arg {
+                NacosGrpcCall::RequestService((_, mut callback)) => {
+                    return GrpcCallTask::new(Box::new(async move {
+                        let error_response = Err(Error::ErrResult("error response".to_string()));
+                        let _ = callback.send(error_response).await;
+                        Ok(())
+                    }));
+                },
+                _ => panic!("wrong args")
+            }
+        });
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::check_server(&mut mock_tonic).await;
+        
+        assert!(ret.is_err());
+
+        let ret = ret.unwrap_err();
+        match ret {
+            ErrResult(msg) => assert_eq!(msg, "check server failed"),
+            _ => panic!("check failed")
+        }
+    }
+
+    #[tokio::test]
+    pub async fn test_check_server_when_response_payload_convert_error() {
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(|arg| {
+            match arg {
+                NacosGrpcCall::RequestService((_, mut callback)) => {
+                    return GrpcCallTask::new(Box::new(async move {
+                        let mut response = ErrorResponse::default();
+                        response.error_code = 301;
+
+                        let grpc_message = GrpcMessageBuilder::new(response).build();
+                        let payload = grpc_message.into_payload();
+                        let _ = callback.send(payload).await;
+                        Ok(())
+                    }));
+                },
+                _ => panic!("wrong args")
+            }
+        });
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::check_server(&mut mock_tonic).await;
+        
+        assert!(ret.is_err());
+
+        let ret = ret.unwrap_err();
+        match ret {
+            ErrResult(msg) => assert_eq!(msg, "check server failed convert to grpc message failed"),
+            _ => panic!("check failed")
+        }
+    }
+
+    #[tokio::test]
+    pub async fn test_check_server_when_connection_id_is_none() {
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(|arg| {
+            match arg {
+                NacosGrpcCall::RequestService((_, mut callback)) => {
+                    return GrpcCallTask::new(Box::new(async move {
+                        let mut response = ServerCheckResponse::default();
+                        response.connection_id = None;
+
+                        let grpc_message = GrpcMessageBuilder::new(response).build();
+                        let payload = grpc_message.into_payload();
+                        let _ = callback.send(payload).await;
+                        Ok(())
+                    }));
+                },
+                _ => panic!("wrong args")
+            }
+        });
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::check_server(&mut mock_tonic).await;
+        
+        assert!(ret.is_err());
+
+        let ret = ret.unwrap_err();
+        match ret {
+            ErrResult(msg) => assert_eq!(msg, "check server failed connection id is empty"),
+            _ => panic!("check failed")
+        }
+    }
+
+    #[tokio::test]
+    pub async fn test_check_server() {
+
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(|arg| {
+            match arg {
+                NacosGrpcCall::RequestService((_, mut callback)) => {
+                    return GrpcCallTask::new(Box::new(async move {
+                        let mut response = ServerCheckResponse::default();
+                        response.connection_id = Some("test-id".to_string());
+
+                        let grpc_message = GrpcMessageBuilder::new(response).build();
+                        let payload = grpc_message.into_payload();
+                        let _ = callback.send(payload).await;
+                        Ok(())
+                    }));
+                },
+                _ => panic!("wrong args")
+            }
+        });
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::check_server(&mut mock_tonic).await;
+        
+        assert!(ret.is_ok());
+
+        let conn_id = ret.unwrap();
+
+        assert_eq!(conn_id, "test-id");
 
     }
 
