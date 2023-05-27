@@ -325,7 +325,6 @@ mockall::mock! {
     }
 }
 
-
 impl Service<NacosGrpcCall> for Tonic {
     type Response = ();
 
@@ -372,7 +371,6 @@ impl Service<NacosGrpcCall> for Tonic {
         }
     }
 }
-
 
 #[cfg(test)]
 mockall::mock! {
