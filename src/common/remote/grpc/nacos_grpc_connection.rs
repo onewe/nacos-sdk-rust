@@ -330,7 +330,11 @@ where
             }.instrument(span).await;
         }.in_current_span());
 
-        let _ = waiter.await;
+        let wait_ret = waiter.await;
+        if let Err(e) = wait_ret {
+            error!("local stream was closed. {}", e);
+            return Err(ErrResult("local stream was closed.".to_string()));
+        }
         Ok(conn_id_sender)
     }
 
@@ -808,10 +812,16 @@ where
 #[cfg(test)]
 pub mod nacos_grpc_connection_tests {
 
+    use std::task::Context;
+
     use super::*;
     use crate::common::remote::grpc::message::response::ErrorResponse;
-    use crate::common::remote::grpc::tonic::MockTonic;
-    use crate::common::remote::grpc::tonic::{GrpcCallTask, MockTonicBuilder};
+    use crate::common::remote::grpc::message::GrpcMessageData;
+    use crate::common::remote::grpc::tonic::{GrpcCallTask, MockTonic, MockTonicBuilder};
+
+    use futures_util::Stream;
+    use tokio::sync::Notify;
+    use tonic::async_trait;
 
     #[tokio::test]
     pub async fn test_check_server_when_response_rx_dropped() {
@@ -1027,7 +1037,7 @@ pub mod nacos_grpc_connection_tests {
         mock_tonic.expect_call().returning(|arg| match arg {
             NacosGrpcCall::RequestService((_, mut callback)) => {
                 return GrpcCallTask::new(Box::new(async move {
-                    let mut response = HealthCheckResponse::default();
+                    let response = HealthCheckResponse::default();
 
                     let grpc_message = GrpcMessageBuilder::new(response).build();
                     let payload = grpc_message.into_payload();
@@ -1041,5 +1051,285 @@ pub mod nacos_grpc_connection_tests {
             NacosGrpcConnection::<MockTonicBuilder>::connection_health_check(&mut mock_tonic).await;
 
         assert!(ret.is_ok());
+    }
+
+    #[tokio::test]
+    pub async fn test_setup_when_response_notify_sender_dropped() {
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(|arg| match arg {
+            NacosGrpcCall::BIRequestService((payload, callback)) => {
+                drop(callback);
+                drop(payload);
+                return GrpcCallTask::new(Box::new(async move { Ok(()) }));
+            }
+            _ => panic!("wrong args"),
+        });
+
+        let server_stream_handlers = Arc::new(HandlerMap::default());
+        let health = Arc::new(AtomicBool::new(true));
+
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::setup(
+            server_stream_handlers,
+            &mut mock_tonic,
+            health.clone(),
+            "RUST_SDK_1.0".to_string(),
+            "public".to_string(),
+            HashMap::default(),
+            NacosClientAbilities::new(),
+        )
+        .await;
+
+        assert!(ret.is_err());
+
+        let ret = ret.unwrap_err();
+
+        match ret {
+            ErrResult(msg) => assert_eq!(msg, "local stream was closed."),
+            _ => panic!("check failed"),
+        }
+
+        assert!(health.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    pub async fn test_setup_when_response_rx_dropped() {
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(|arg| match arg {
+            NacosGrpcCall::BIRequestService((mut payload, mut callback)) => {
+                return GrpcCallTask::new(Box::new(async move {
+                    let _is_ok = callback.can_send().await;
+                    drop(callback);
+                    tokio::task::yield_now().await;
+                    let _next_element = payload.next().await;
+                    Ok(())
+                }));
+            }
+            _ => panic!("wrong args"),
+        });
+
+        let server_stream_handlers = Arc::new(HandlerMap::default());
+        let health = Arc::new(AtomicBool::new(true));
+
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::setup(
+            server_stream_handlers,
+            &mut mock_tonic,
+            health.clone(),
+            "RUST_SDK_1.0".to_string(),
+            "public".to_string(),
+            HashMap::default(),
+            NacosClientAbilities::new(),
+        )
+        .await;
+
+        assert!(ret.is_ok());
+
+        let ret = ret.unwrap();
+
+        assert!(ret.is_closed());
+
+        assert!(health.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    pub async fn test_setup_when_response_error() {
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(|arg| match arg {
+            NacosGrpcCall::BIRequestService((mut payload, mut callback)) => {
+                return GrpcCallTask::new(Box::new(async move {
+                    let _is_ok = callback.can_send().await;
+                    let _ret = callback
+                        .send(Err(ErrResult("test response error".to_string())))
+                        .await;
+                    tokio::task::yield_now().await;
+                    let _next_element = payload.next().await;
+                    Ok(())
+                }));
+            }
+            _ => panic!("wrong args"),
+        });
+
+        let server_stream_handlers = Arc::new(HandlerMap::default());
+        let health = Arc::new(AtomicBool::new(true));
+
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::setup(
+            server_stream_handlers,
+            &mut mock_tonic,
+            health.clone(),
+            "RUST_SDK_1.0".to_string(),
+            "public".to_string(),
+            HashMap::default(),
+            NacosClientAbilities::new(),
+        )
+        .await;
+
+        assert!(ret.is_ok());
+
+        let ret = ret.unwrap();
+
+        assert!(ret.is_closed());
+
+        assert!(health.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    pub async fn test_setup_when_response_error_stream() {
+        let notify = Arc::new(Notify::new());
+        let server_stream_notify = notify.clone();
+
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(move |arg| {
+            let server_stream_notify = server_stream_notify.clone();
+            match arg {
+                NacosGrpcCall::BIRequestService((mut payload, mut callback)) => {
+                    return GrpcCallTask::new(Box::new(async move {
+                        let _is_ok = callback.can_send().await;
+
+                        struct HealthCheckResponseStream(Arc<Notify>);
+
+                        impl Stream for HealthCheckResponseStream {
+                            type Item = Result<Payload, Error>;
+
+                            fn poll_next(
+                                self: Pin<&mut Self>,
+                                _: &mut Context<'_>,
+                            ) -> Poll<Option<Self::Item>> {
+                                Poll::Ready(Some(Err(ErrResult("test response error".to_string()))))
+                            }
+                        }
+
+                        impl Drop for HealthCheckResponseStream {
+                            fn drop(&mut self) {
+                                self.0.notify_one();
+                            }
+                        }
+
+                        let grpc_stream = GrpcStream::new(Box::pin(HealthCheckResponseStream(
+                            server_stream_notify,
+                        )));
+
+                        let _ret = callback.send(Ok(grpc_stream)).await;
+                        let _next_element = payload.next().await;
+                        Ok(())
+                    }));
+                }
+                _ => panic!("wrong args"),
+            }
+        });
+
+        let server_stream_handlers = Arc::new(HandlerMap::default());
+        let health = Arc::new(AtomicBool::new(true));
+
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::setup(
+            server_stream_handlers,
+            &mut mock_tonic,
+            health.clone(),
+            "RUST_SDK_1.0".to_string(),
+            "public".to_string(),
+            HashMap::default(),
+            NacosClientAbilities::new(),
+        )
+        .await;
+
+        assert!(ret.is_ok());
+        let ret = ret.unwrap();
+        assert!(!ret.is_closed());
+        let _ = ret.send("test-conn-id".to_string());
+
+        notify.notified().await;
+
+        assert!(!health.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    pub async fn test_setup_when_local_stream_closed() {
+        let notify = Arc::new(Notify::new());
+        let server_stream_notify = notify.clone();
+
+        let mut mock_tonic = MockTonic::new();
+        mock_tonic.expect_call().returning(move |arg| {
+            let server_stream_notify = server_stream_notify.clone();
+            match arg {
+                NacosGrpcCall::BIRequestService((mut payload, mut callback)) => {
+                    return GrpcCallTask::new(Box::new(async move {
+                        let _is_ok = callback.can_send().await;
+
+                        struct HealthCheckResponseStream(Arc<Notify>);
+
+                        impl Stream for HealthCheckResponseStream {
+                            type Item = Result<Payload, Error>;
+
+                            fn poll_next(
+                                self: Pin<&mut Self>,
+                                _: &mut Context<'_>,
+                            ) -> Poll<Option<Self::Item>> {
+                                let response = HealthCheckResponse::default();
+                                let grpc_message = GrpcMessageBuilder::new(response).build();
+                                let payload = grpc_message.into_payload();
+                                Poll::Ready(Some(payload))
+                            }
+                        }
+
+                        impl Drop for HealthCheckResponseStream {
+                            fn drop(&mut self) {
+                                self.0.notify_one();
+                            }
+                        }
+
+                        let grpc_stream = GrpcStream::new(Box::pin(HealthCheckResponseStream(
+                            server_stream_notify,
+                        )));
+
+                        let _next_element = payload.next().await;
+                        drop(payload);
+
+                        let _ret = callback.send(Ok(grpc_stream)).await;
+
+                        Ok(())
+                    }));
+                }
+                _ => panic!("wrong args"),
+            }
+        });
+
+        struct TestServerRequestHandler;
+
+        #[async_trait]
+        impl ServerRequestHandler for TestServerRequestHandler {
+            async fn request_reply(&self, _: Payload) -> Option<Payload> {
+                let response = HealthCheckResponse::default();
+                let grpc_message = GrpcMessageBuilder::new(response).build();
+                let payload = grpc_message.into_payload().unwrap();
+                Some(payload)
+            }
+        }
+
+        let mut handler_map = HandlerMap::default();
+        handler_map.insert(
+            HealthCheckResponse::identity().to_string(),
+            Arc::new(TestServerRequestHandler),
+        );
+
+        let server_stream_handlers = Arc::new(handler_map);
+        let health = Arc::new(AtomicBool::new(true));
+
+        let ret = NacosGrpcConnection::<MockTonicBuilder>::setup(
+            server_stream_handlers,
+            &mut mock_tonic,
+            health.clone(),
+            "RUST_SDK_1.0".to_string(),
+            "public".to_string(),
+            HashMap::default(),
+            NacosClientAbilities::new(),
+        )
+        .await;
+
+        assert!(ret.is_ok());
+        let ret = ret.unwrap();
+        assert!(!ret.is_closed());
+        let _ = ret.send("test-conn-id".to_string());
+
+        notify.notified().await;
+
+        assert!(!health.load(Ordering::Acquire));
     }
 }
